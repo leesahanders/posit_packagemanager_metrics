@@ -1,0 +1,406 @@
+---
+title: "Package Manager Metrics"
+author: "LA"
+date: "2023-12-07"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+> Please note that most of the above mentioned API Endpoints are not officially documented and not fully supported and hence can be subject to change in future versions of PPM. Any of those Endpoints however are visible via using Developer Tools in the web browser.
+
+```{r echo = FALSE, results = 'hide', message=FALSE, warning=FALSE}
+library(httr)
+library(tidyr)
+library(dplyr)
+library(reactable)
+library(DT)
+library(stringr)
+
+# var_url = "https://colorado.posit.co/rspm/"
+# var_sources_internal_packages = c(161,9,5) # source id's for transaction information c(8,9,15,161,177)
+# var_repos_internal_packages = 8 # source id's for transaction information c(8,9,15,161,177)
+# var_repos_bioconductor = 13 # repository id for bioconductor 
+# var_version_bioconductor = 3.16
+# lookback = 450 #days
+
+var_url = "https://packagemanager.posit.co/"
+var_sources_internal_packages = c(161,9,5) # source id's for transaction information c(8,9,15,161,177)
+var_repos_internal_packages = 8 # source id's for transaction information c(8,9,15,161,177)
+var_repos_bioconductor = 4 # repository id for bioconductor #13
+var_version_bioconductor = 3.16
+lookback = 450 #days
+
+```
+
+## Variables selected
+
+URL: '`r paste(var_url)`'
+
+Internal packages source: '`r paste(var_sources_internal_packages, collapse=",")`'
+
+Internal packages repo: '`r paste(var_repos_internal_packages)`'
+
+Bioconductor repo: '`r paste(var_repos_bioconductor)`'
+
+Bioconductor version: '`r paste(var_version_bioconductor)`'
+
+Lookback period (days): '`r paste(lookback)`'
+
+
+
+## Server information {.tabset}
+
+### Server Status
+
+```{r}
+#Server status 
+resp <- GET(paste0(var_url, "__api__/status"), format="json")
+status <- content(resp, type="application/json")
+
+print(status)
+```
+
+
+### Repos
+
+Use this to get the number for your repositories of interest: 
+
+```{r}
+#List of repos
+resp <- GET(paste0(var_url, "__api__/repos"), format="json")
+repos <- content(resp, type="application/json")
+repos <- unnest_wider(tibble::tibble(repos = repos), repos) %>%
+  arrange(desc(id))
+
+DT::datatable(repos)
+```
+
+### Sources
+
+Use this to get the number for your sources of interest: 
+
+```{r}
+#List of sources
+resp <- GET(paste0(var_url, "__api__/sources"), format="json")
+sources <- content(resp, type="application/json")
+sources = sources$Sources
+sources <- unnest_wider(tibble::tibble(sources = sources), sources) %>%
+  arrange(desc(id))
+
+DT::datatable(sources)
+```
+
+
+### Repos to Sources Lookup 
+
+Use this to see which sources are being pulled into which repositories: 
+
+```{r}
+#Source to repo correlation
+sources_repos = data.frame()
+
+for(tmp in repos$id){
+  resp <- GET(paste0(var_url, "__api__/repos/",tmp,"/sources"), format="json")
+  sources_repos_tmp <- content(resp, type="application/json")
+  sources_repos_tmp <- unnest_wider(tibble::tibble(sources_repos_tmp = sources_repos_tmp), sources_repos_tmp) %>%
+    mutate(repo_id = tmp) %>%
+    rename(source_id = id)
+  
+  sources_repos <- rbind(sources_repos, sources_repos_tmp)
+}
+
+DT::datatable(sources_repos)
+```
+
+## Package Downloads 
+
+PPM has an endpoint metrics/packages that allows you to get the download count of a given package for the last x days which should make it simple to expand this to date ranges. A sample call for package clustermq ’s download stats for the last 112 days would look like
+
+`curl "https://packagemanager.posit.co/__api__/metrics/packages?_sort=count&_order=desc&_days=112&_sourceType=r&name_like=clustermq"`
+
+Even better would be to get the download stats for all R packages on PPM via
+
+`curl "https://colorado.posit.co/rspm/__api__/metrics/packages?_sourceType=r&_days=112&_sort=count&_order=desc"`
+
+If you want to extract the metrics between x and y days prior to today, you run the API call above twice and then simply subtract the numbers.
+
+Total  sourceType r package downloads: 
+
+```{r}
+resp <- GET(paste0(var_url,"__api__/metrics/packages?_sourceType=r&_days=",lookback,"&_sort=count&_order=desc"), format="json")
+metricsPackages <- content(resp, type="application/json")
+metricsPackages <- unnest_wider(tibble::tibble(metricsPackages = metricsPackages), metricsPackages) 
+
+metricsPackages %>% 
+  summarize(count = sum(count))
+```
+
+Total  sourceType python package downloads:
+
+```{r}
+resp <- GET(paste0(var_url,"__api__/metrics/packages?_sourceType=python&_days=",lookback,"&_sort=count&_order=desc"), format="json")
+metricsPackagesPython <- content(resp, type="application/json")
+metricsPackagesPython <- unnest_wider(tibble::tibble(metricsPackagesPython = metricsPackagesPython), metricsPackagesPython)
+
+metricsPackagesPython %>%
+  summarize(count = sum(count))
+```
+
+# Bioconductor Packages 
+
+Count of bioconductor package downloads on a quarterly basis. (Please note that you must supply the version of Bioconductor to the query)
+
+`curl "https://colorado.posit.co/rspm/__api__/repos/13/packages?&bioc_version=3.16"`
+
+Bioconductor packages are included under the r sourceType, so in order to get this information we must get a list of the Bioconductor packages to then use to filter down to. 
+
+
+```{r}
+# Get list of Bioconductor packages:  
+
+iterations = 5
+
+packagesBioc = data.frame()
+
+for(tmp in 1:iterations){
+  # resp <- GET(paste0(var_url,"__api__/repos/",var_repos_bioconductor,"/packages?_limit=",tmp,"000&bioc_version=",var_version_bioconductor), format="json")
+  resp <- GET(paste0(var_url,"__api__/repos/",var_repos_bioconductor,"/packages?_limit=1000&_page=",tmp,"&bioc_version=",var_version_bioconductor), format="json")
+  packagesBioc_tmp <- content(resp, type="application/json")
+  packagesBioc_tmp <- unnest_wider(tibble::tibble(packagesBioc_tmp = packagesBioc_tmp), packagesBioc_tmp) 
+  
+  packagesBioc = rbind(packagesBioc, packagesBioc_tmp)
+}
+```
+
+
+```{r}
+# Get Bioconductor downloads:  
+
+resp <- GET(paste0(var_url,"__api__/metrics/packages?_sourceType=r&_days=",lookback,"&_sort=count&_order=desc"), format="json")
+metricsPackagesBioc <- content(resp, type="application/json")
+metricsPackagesBioc <- unnest_wider(tibble::tibble(metricsPackagesBioc = metricsPackagesBioc), metricsPackagesBioc) 
+```
+
+
+Total Bioconductor package downloads: 
+
+```{r}
+metricsPackagesBioc %>% 
+  merge(packagesBioc, by=c("name"), all.y=TRUE) %>%
+  summarize(count = sum(count, na.rm = TRUE))
+```
+
+Table of Bioconductor packages that were downloaded: 
+
+```{r}
+metricsPackagesBioc %>% 
+  merge(packagesBioc, by=c("name"), all.y=TRUE) %>%
+  group_by(name) %>%
+  summarize(count = sum(count, na.rm = TRUE)) %>% 
+  arrange(desc(count))
+```
+
+
+## Internal packages {.tabset}
+
+### Packages in a source 
+
+```{r}
+# Get all packages in specified sources
+iterations = 1
+
+packagesSource = data.frame()
+
+for(tmp1 in var_sources_internal_packages){
+  for(tmp2 in 1:iterations){
+    # resp <- GET(paste0(var_url,"__api__/sources/",tmp1,"/packages?_limit=",tmp2,"000"), format="json")
+    resp <- GET(paste0(var_url,"__api__/sources/",tmp1,"/packages?_limit=1000&_page=",tmp2), format="json")
+    packagesSource_tmp <- content(resp, type="application/json")
+    packagesSource_tmp <- unnest_wider(tibble::tibble(packagesSource_tmp = packagesSource_tmp), packagesSource_tmp) 
+    
+    packagesSource = rbind(packagesSource, packagesSource_tmp)
+  }
+}
+
+packagesSource <- mutate(packagesSource, date = as.Date(occurred)) %>% 
+  filter(tran_delete == 0)
+```
+
+Total number of packages across sources '`r paste(sources %>% filter(id %in% var_sources_internal_packages) %>% select(id, name))`': 
+
+```{r}
+nrow(packagesSource)
+```
+
+New packages across sources '`r paste(sources %>% filter(id %in% var_sources_internal_packages) %>% select(id, name))`': 
+
+```{r}
+nrow(packagesSource %>% filter(date > (Sys.Date()-lookback)))
+```
+
+View the packages: 
+
+```{r}
+DT::datatable(packagesSource %>% select(id, source_type, name, version, source_id, author, maintainer, occurred, package_size, downloads))
+```
+
+
+### Packages in a repo
+
+```{r}
+# Get list of packages in repos:  
+
+iterations = 5
+
+packagesRepo = data.frame()
+
+for(tmp in 1:iterations){
+  resp <- GET(paste0(var_url,"__api__/repos/",var_repos_internal_packages,"/packages?_limit=1000&_page=",tmp,"&bioc_version=",var_version_bioconductor), format="json")
+  packagesRepo_tmp <- content(resp, type="application/json")
+  packagesRepo_tmp <- unnest_wider(tibble::tibble(packagesRepo_tmp = packagesRepo_tmp), packagesRepo_tmp)  
+  
+  packagesRepo = rbind(packagesRepo, packagesRepo_tmp)
+}
+
+
+packagesRepo <- packagesRepo %>%
+  mutate(date = as.Date(occurred)) %>% 
+  filter(tran_delete == 0)
+```
+
+Total number of packages across repo '`r paste(repos %>% filter(id %in% var_repos_internal_packages) %>% select(id, name))`': 
+
+```{r}
+nrow(packagesRepo)
+```
+
+New packages across sources '`r paste(sources %>% filter(id %in% var_sources_internal_packages) %>% select(id, name))`': 
+
+```{r}
+nrow(packagesRepo %>% filter(date > (Sys.Date()-lookback)))
+```
+
+View the packages: 
+
+```{r}
+DT::datatable(packagesRepo %>% select(name, version, tran_delete, type, description, author, maintainer, bug_reports, occurred, package_size, downloads))
+```
+
+### Transaction History
+
+Let’s assume all internal R packages are stored in repo number 9, then
+
+`curl "https://colorado.posit.co/rspm/__api__/sources/9/transactions?_sort=created" | jq`
+
+will list all the transactions in this repository. The information contains tags like packages_added, packages_updated and so on. In order to extract the numbers for a given time period it is a matter of scripting in your favourite language. 
+
+```{r}
+# Get transaction details for multiple sources and join together (change filter date)
+
+transactions = data.frame()
+
+for(tmp in var_sources_internal_packages){
+  print(tmp)
+  resp <- GET(paste0(var_url, "__api__/sources/",tmp,"/transactions?_sort=created"), format="json")
+  transactions_tmp <- content(resp, type="application/json")
+  transactions_tmp <- unnest_wider(tibble::tibble(transactions_tmp = transactions_tmp), transactions_tmp) 
+  
+  transactions = rbind(transactions, transactions_tmp)
+}
+
+
+transactions <- mutate(transactions, package = stringi::stri_extract_all_regex(tag, '(?<=").*?(?=")')) %>% 
+  mutate(created_date = as.Date(created)) 
+
+transactions_lookback = filter(transactions, created_date > (Sys.Date()-lookback))
+
+#DT::datatable(transactions)
+```
+
+Count of git backed packages: 
+
+```{r}
+internal_packages <- transactions_lookback %>% 
+  filter(type==12) %>%
+  select(package) %>%
+  unique()
+
+
+summarize(internal_packages, count = n())
+
+# Transactions per package
+# transactions %>% 
+#   filter(type==12) %>% # This is the transaction type for git runners 
+#   group_by(package) %>%
+#   summarize(count = n())
+```
+
+Count of new git-backed packages: 
+
+```{r}
+transactions_package <- filter(transactions, type==12) %>%
+  select(package, created_date) %>%
+  group_by(package) %>% 
+  summarize(first_date = min(created_date)) %>% 
+  filter(first_date > (Sys.Date()-lookback)) %>%
+  ungroup() %>%
+  summarize(count = n())
+
+transactions_package
+```
+
+Total internal / git backed package transactions: 
+
+```{r}
+transactions_lookback %>% 
+  filter(type==12) %>%
+  summarize(count = n())
+```
+
+View the new packages: 
+
+```{r}
+transactions_package <- filter(transactions, type==12) %>%
+  select(package, created_date) %>%
+  group_by(package) %>% 
+  summarize(first_date = min(created_date)) %>% 
+  filter(first_date > (Sys.Date()-lookback)) 
+
+DT::datatable(transactions_package)
+```
+
+View the transactions: 
+
+```{r}
+DT::datatable(transactions)
+```
+
+
+## Database query 
+
+Alternatively you could consider querying the database directly: 
+
+```r
+library(DBI)
+con <- dbConnect(odbc::odbc(), Driver="postgresql", Server = "<REDACTED>", Port = "5432", Database = "rspm_metrics", UID = "<REDACTED>", PWD = rstudioapi::askForPassword("Database password:"), BoolsAsChar = "", timeout = 10)
+```
+
+Tables: 
+
+- store_metadata
+- schedule
+- sqlite_sequence
+- downloads
+- pypi_downloads
+- daily_downloads
+- pypi_daily_downloads
+- named_daily_downloads
+
+
+
+
